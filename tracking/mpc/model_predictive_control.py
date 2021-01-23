@@ -24,11 +24,7 @@ GOAL_DIS = 1.5  # goal distance
 STOP_SPEED = 0.5 / 3.6  # stop speed
 MAX_TIME = 1000.0  # max simulation time
 
-# iterative paramter
-MAX_ITER = 1  # Max iteration
-DU_TH = 0.1  # iteration finish param
-
-TARGET_SPEED = 5.0 / 3.6  # [m/s] target speed
+TARGET_SPEED = 10.0 / 3.6  # [m/s] target speed
 N_IND_SEARCH = 10  # Search index number
 
 DT = 0.1  # [s] time tick
@@ -200,18 +196,16 @@ def predict_motion(x0, oa, od, xref):
 
 
 def iterative_linear_mpc_control(xref, x0, dref, oa, od):
-    """
-    MPC contorl with updating operational point iteraitvely
-    """
-
     if oa is None or od is None:
         oa = [0.0] * T
         od = [0.0] * T
-
-    xbar = predict_motion(x0, oa, od, xref)
-    poa, pod = oa[:], od[:]
-    oa, od, ox, oy, oyaw, ov = linear_mpc_control(xref, xbar, x0, dref)
-    du = sum(abs(oa - poa)) + sum(abs(od - pod))  # calc u change value
+    for i in range(5):
+        xbar = predict_motion(x0, oa, od, xref)
+        poa, pod = oa[:], od[:]
+        oa, od, ox, oy, oyaw, ov = linear_mpc_control(xref, xbar, x0, dref)
+        du = sum(abs(oa - poa)) + sum(abs(od - pod))  # calc u change value
+        if du < 1e-3:
+            break
 
     return oa, od, ox, oy, oyaw, ov
 
@@ -219,18 +213,18 @@ def iterative_linear_mpc_control(xref, x0, dref, oa, od):
 # MPC using ACADO
 def linear_mpc_control(xref, xbar, x0, dref):
     # see acado.c for parameter details
-    _x0=np.zeros((1,NX))
-    X=np.zeros((T+1,NX))
-    U=np.zeros((T,NU))
-    Y=np.zeros((T,NY))
-    yN=np.zeros((1,NYN))
-    _x0[0,:]=np.transpose(x0)  # initial state
+    _x0 = np.zeros((1,NX))
+    X = np.zeros((T+1,NX))
+    U = np.zeros((T,NU))
+    Y = np.zeros((T,NY))
+    yN = np.zeros((1,NYN))
+    _x0[0,:] = np.transpose(x0)  # initial state
     for t in range(T):
       Y[t,:] = np.transpose(xref[:,t])  # reference state
       X[t,:] = np.transpose(xbar[:,t])  # predicted state
     X[-1,:] = X[-2,:]
-    yN[0,:]=Y[-1,:NYN]         # reference terminal state
-    X, U = acado.mpc(0, 1, _x0, X,U,Y,yN, np.transpose(np.tile(Q,T)), Qf, 0)
+    yN[0,:] = Y[-1,:NYN]         # reference terminal state
+    X, U = acado.mpc(0, 1, _x0, X, U, Y, yN, np.transpose(np.tile(Q,T)), Qf, 0)
     ox = get_nparray_from_matrix(X[:,0])
     oy = get_nparray_from_matrix(X[:,1])
     ov = get_nparray_from_matrix(X[:,2])
@@ -402,6 +396,10 @@ def do_simulation(cx, cy, cyaw, ck, sp, dl, initial_state):
             plt.plot(cx[target_ind], cy[target_ind], "xg", label="target")
             plot_car(state.x, state.y, state.yaw, steer=di)
             plt.axis("equal")
+            if not isgoal:
+                ll = 15
+                plt.xlim(state.x-ll, state.x+ll)
+                plt.ylim(state.y-ll, state.y+ll)
             plt.grid(True)
             plt.title("Time[s]:" + str(round(time, 2))
                       + ", speed[km/h]:" + str(round(state.v * 3.6, 2)))
@@ -417,10 +415,12 @@ def do_simulation(cx, cy, cyaw, ck, sp, dl, initial_state):
             minorLocator = MultipleLocator(spacing)
             ax.yaxis.set_minor_locator(minorLocator)
             #ax.xaxis.set_minor_locator(minorLocator)
+
             ax.grid(which = 'minor')
             plt.legend()
             plt.xlabel("Time [s]")
             plt.ylabel("Speed [m/s], Error x/y [m]")
+
             plt.pause(0.0001)
 
         if isgoal:
@@ -538,14 +538,14 @@ def main():
 
     dl = 1.0  # course tick
     # cx, cy, cyaw, ck = get_straight_course(dl)
-    # cx, cy, cyaw, ck = get_straight_course2(dl)
-    cx, cy, cyaw, ck = get_straight_course3(dl)
+    cx, cy, cyaw, ck = get_straight_course2(dl)
+    # cx, cy, cyaw, ck = get_straight_course3(dl)
     # cx, cy, cyaw, ck = get_forward_course(dl)
     # cx, cy, cyaw, ck = get_switch_back_course(dl)
 
     sp = calc_speed_profile(cx, cy, cyaw, TARGET_SPEED)
 
-    initial_state = State(x=cx[0], y=cy[0], yaw=cyaw[0], v=0.0)
+    initial_state = State(x=cx[0], y=cy[0], yaw=cyaw[0], v=0.2)
 
     t, x, y, yaw, v, d, a = do_simulation(
         cx, cy, cyaw, ck, sp, dl, initial_state)
