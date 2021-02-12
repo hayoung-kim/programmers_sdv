@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 #-*- coding: utf-8 -*-
 
 import rospy
@@ -11,12 +11,16 @@ import sys
 
 from scipy.interpolate import interp1d
 
-from visualization_msgs.msg import Marker
-from geometry_msgs.msg import Quaternion
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import *
+from geometry_msgs.msg import Quaternion, Point
 from object_msgs.msg import Object
 
 import pickle
 import argparse
+
+from stanley import stanley_control
+from optimal_trajectory_Frenet import *
 
 rospack = rospkg.RosPack()
 path = rospack.get_path("map_server")
@@ -133,6 +137,46 @@ def get_ros_msg(x, y, yaw, v, id):
         "quaternion": quat
     }
 
+def get_path_msg(path, opt_ind):
+    markerarray = MarkerArray()
+
+    for id, fp in enumerate(path):
+        marker = Marker()
+        marker.id = id
+        marker.header.frame_id = "/map"
+        marker.type = marker.POINTS
+        marker.action = marker.ADD
+
+        if id == opt_ind:
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+            marker.color.a = 1.0
+
+            marker.scale.x = 0.5
+            marker.scale.y = 0.5
+
+        else:
+            marker.color.r = 0.0
+            marker.color.g = 1.0
+            marker.color.b = 0.0
+            marker.color.a = 0.5
+
+            marker.scale.x = 0.25
+            marker.scale.y = 0.25
+
+        for x, y in zip(fp.x, fp.y):
+            point = Point()
+            #point.x = x  + 1.3 * math.cos(fp.yaw[id])
+            #point.y = y  + 1.3 * math.sin(fp.yaw[id])
+            point.x = x
+            point.y = y
+            marker.points.append(point)
+
+        markerarray.markers.append(marker)
+
+    return markerarray
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Spawn a CV agent')
@@ -141,7 +185,7 @@ if __name__ == "__main__":
     parser.add_argument("--route", "-r", type=int,
                         help="start index in road network. select in [1, 3, 5, 10]", default=5)
     parser.add_argument("--dir", "-d", type=str, default="left", help="direction to go: [left, straight, right]")
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     rospy.init_node("three_cv_agents_node_" + str(args.id))
 
@@ -149,6 +193,7 @@ if __name__ == "__main__":
     tf_broadcaster = tf.TransformBroadcaster()
     marker_pub = rospy.Publisher("/objects/marker/car_" + str(id), Marker, queue_size=1)
     object_pub = rospy.Publisher("/objects/car_" + str(id), Object, queue_size=1)
+    path_marker_pub = rospy.Publisher("visualization_marker", MarkerArray, queue_size=1)
 
     start_node_id = args.route
     route_id_list = [start_node_id] + rn_id[start_node_id][args.dir]
@@ -173,29 +218,97 @@ if __name__ == "__main__":
 
     target_speed = 20.0 / 3.6
     state = State(x=waypoints["x"][ind], y=waypoints["y"][ind], yaw=waypoints["yaw"][ind], v=0.1, dt=0.01)
+ 
+    traj_xs = waypoints["x"]
+    traj_ys = waypoints["y"]
+    traj_yaws = waypoints["yaw"]
+
+    # get maps
+    maps = np.zeros(traj_xs.shape)
+    for i in range(len(traj_xs)-1):
+        x = traj_xs[i]
+        y = traj_ys[i]
+        sd = get_frenet(x, y, traj_xs, traj_ys)
+        maps[i] = sd[0]
+
+    # initial condition, convert global coordinate to frenet coordinate
+    s, d = get_frenet(state.x, state.y, traj_xs, traj_ys);
+    x, y, yaw_road = get_cartesian(s, d, traj_xs, traj_ys, maps)
+    yawi = state.yaw - yaw_road
+
+    # s 방향 초기조건
+    si = s
+    si_d = state.v*np.cos(yawi)
+    si_dd = 0
+    sf_d = target_speed
+    sf_dd = 0
+
+    # d 방향 초기조건
+    di = d
+    di_d = state.v*np.sin(yawi)
+    di_dd = 0
+    df_d = 0
+    df_dd = 0
+
+    opt_d = di
+
+    obs = np.array([
+        [148, 0.567],
+        [151, 0.567],
+        [156, 0.567],
+        [229, -1.13],
+        [232, -1.13],
+        [235, -1.13],
+        [103, 1.3],
+        [106, 1.3],
+        [109, 1.3],
+        [299, 0.5],
+        [302, 0.5],
+        [305, 0.5],
+        [350, 0.6],
+        [353, 0.6],
+        [356, 0.6]
+    ])
 
     r = rospy.Rate(100)
     while not rospy.is_shutdown():
-        # generate acceleration ai, and steering di
-        # YOUR CODE HERE
-        ai = 0.0
-        di = 0.0
+        path, opt_ind = frenet_optimal_planning(si, si_d, si_dd, sf_d, sf_dd, di, di_d, di_dd, df_d, df_dd, obs, traj_xs, traj_ys, maps, opt_d)
 
-        # update state with acc, delta
-        state.update(ai, di)
+        # generate acceleration ai, and steering di
+        speed_error = target_speed - state.v
+        ai = 0.5 * speed_error
+
+        delta = stanley_control(state.x, state.y, state.yaw, state.v, path[opt_ind].x, path[opt_ind].y, path[opt_ind].yaw)
+        #print("state.x: {}, state.y: {}, state.yaw: {}".format(path[opt_ind].x[0], path[opt_ind].y[0], path[opt_ind].yaw[0]))
+        #print("s-dir: {}, d-dir: {}".format(path[opt_ind].s[0], path[opt_ind].d[0]))
 
         # vehicle state --> topic msg
-        msg = get_ros_msg(state.x, state.y, state.yaw, state.v, id=id)
+        msg = get_ros_msg(path[opt_ind].x[0], path[opt_ind].y[0], path[opt_ind].yaw[0], state.v, id=id)
 
         # send tf
         tf_broadcaster.sendTransform(
-            (state.x, state.y, 1.5),
+            (path[opt_ind].x[0], path[opt_ind].y[0], path[opt_ind].yaw[0]),
             msg["quaternion"],
             rospy.Time.now(),
             "/car_" + str(id), "/map"
         )
+        # path state --> topic msg
+        path_msg = get_path_msg(path, opt_ind)
+        # update state with acc, delta
+        state.update(ai, delta)
+        
+        si = path[0].s[1]
+        si_d = path[0].s_d[1]
+        si_dd = path[0].s_dd[1]
+        di = path[0].d[1]
+        di_d = path[0].d_d[1]
+        di_dd = path[0].d_dd[1]
 
+        # consistency cost를 위해 update
+        opt_d = path[opt_ind].d[-1]
+        
         # publish vehicle state in ros msg
         object_pub.publish(msg["object_msg"])
+        path_marker_pub.publish(path_msg)
 
         r.sleep()
